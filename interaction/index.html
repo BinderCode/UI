@@ -1,0 +1,1336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UI Rollback Attack</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: sans-serif; margin: 0; padding: 0; }
+    .nav { display: flex; gap: 0; border-bottom: 1px solid #ccc; background: #f5f5f5; padding: 0 1rem; }
+    .nav a { padding: 0.75rem 1.25rem; text-decoration: none; color: #333; border-bottom: 3px solid transparent; }
+    .nav a:hover { background: #eee; }
+    .nav a.active { border-bottom-color: #1a73e8; color: #1a73e8; font-weight: 500; }
+    .panes { padding: 1.5rem; }
+    /* Task collection pane: constrain main height, hide overflow, scroll only in cards area */
+    .panes:has(#pane-tasks.active) { overflow: hidden; height: calc(100vh - 52px); min-height: 0; }
+    .pane { display: none; }
+    .pane.active { display: block; }
+    .pane h2 { margin-top: 0; }
+    .form-row { margin-bottom: 1rem; }
+    .form-row label { display: inline-block; width: 240px; min-width: 240px; white-space: nowrap; }
+    .form-row input[type="text"] { width: 600px; padding: 4px 8px; }
+    .form-actions { margin-top: 1rem; }
+    .form-actions button { padding: 6px 14px; margin-right: 8px; cursor: pointer; }
+    .msg { margin-left: 8px; font-size: 0.9em; }
+    .msg.ok { color: #0a0; }
+    .msg.err { color: #c00; }
+    /* Task collection layout: apply only when pane is active */
+    #pane-tasks.active { margin: -1.5rem -1.5rem 0 -1.5rem; padding: 0; height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; }
+    #pane-tasks.active .tasks-layout { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    #pane-tasks.active .tasks-left { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: #f8f9fa; }
+    #pane-tasks.active .tasks-cards-wrap { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+    #pane-tasks.active .tasks-progress { flex-shrink: 0; padding: 10px 16px; background: #e8f4fd; border-top: 1px solid #dee2e6; font-size: 13px; }
+    #pane-tasks.active .tasks-progress .overall { font-weight: 500; }
+    #pane-tasks.active .tasks-progress .current { margin-top: 4px; color: #555; }
+    #pane-tasks.active .tasks-right { width: 300px; flex-shrink: 0; border-left: 1px solid #dee2e6; background: #fff; overflow: hidden; padding: 12px; }
+    #pane-tasks.active .tasks-control label { display: block; margin: 6px 0; }
+    #pane-tasks.active .tasks-control input[type="radio"] { margin-right: 6px; }
+    #pane-tasks.active .tasks-control .ctrl-btns { margin-top: 10px; }
+    #pane-tasks.active .tasks-control .ctrl-btns button { display: block; width: 100%; margin-bottom: 8px; padding: 8px 12px; font-size: 13px; border: 1px solid #dee2e6; border-radius: 4px; background: #fff; cursor: pointer; }
+    #pane-tasks.active .tasks-control .ctrl-btns button:hover { background: #f8f9fa; border-color: #adb5bd; }
+    #pane-tasks.active .tasks-control .ctrl-btns button.primary { background: #007bff; color: #fff; border-color: #007bff; }
+    #pane-tasks.active .tasks-control .ctrl-btns button.primary:hover { background: #0056b3; }
+    #pane-tasks.active .tasks-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+    #pane-tasks.active .task-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; min-height: 120px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); transition: box-shadow 0.2s; }
+    #pane-tasks.active .task-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    #pane-tasks.active .task-card-id { font-weight: 600; font-size: 13px; color: #495057; margin-bottom: 8px; }
+    #pane-tasks.active .task-card-goal { flex: 1; font-size: 13px; color: #212529; line-height: 1.45; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; word-break: break-word; }
+    #pane-tasks.active .task-card-footer { margin-top: 8px; padding-top: 8px; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; font-size: 12px; flex-wrap: wrap; gap: 4px; }
+    #pane-tasks .task-card-status { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+    #pane-tasks.active .task-card-status.pending { background: #e9ecef; color: #495057; }
+    #pane-tasks.active .task-card-status.running { background: #cce5ff; color: #004085; }
+    #pane-tasks.active .task-card-status.success { background: #d4edda; color: #155724; }
+    #pane-tasks.active .task-card-status.failed { background: #f8d7da; color: #721c24; }
+    #pane-tasks.active .task-card-duration { color: #6c757d; }
+    #pane-tasks.active .tasks-list-empty { padding: 24px; text-align: center; color: #6c757d; font-size: 14px; }
+    /* Post-processing pane: apply when #pane-post.active */
+    .panes:has(#pane-post.active) { overflow: hidden; height: calc(100vh - 52px); min-height: 0; }
+    #pane-post.active { margin: -1.5rem -1.5rem 0 -1.5rem; padding: 0; height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; }
+    #pane-post.active .post-layout { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    #pane-post.active .post-left { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: #f8f9fa; }
+    #pane-post.active .post-cards-wrap { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+    #pane-post.active .post-progress { flex-shrink: 0; padding: 10px 16px; background: #e8f4fd; border-top: 1px solid #dee2e6; font-size: 13px; }
+    #pane-post.active .post-right { width: 300px; flex-shrink: 0; border-left: 1px solid #dee2e6; background: #fff; overflow: hidden; padding: 12px; }
+    #pane-post.active .post-control button { display: block; width: 100%; margin-bottom: 8px; padding: 8px 12px; font-size: 13px; border: 1px solid #dee2e6; border-radius: 4px; background: #fff; cursor: pointer; }
+    #pane-post.active .post-control button.primary { background: #007bff; color: #fff; border-color: #007bff; }
+    #pane-post.active .post-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 160px)); gap: 12px; justify-content: start; }
+    #pane-post.active .post-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 0; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.06); width: 100%; max-width: 160px; }
+    #pane-post.active .post-card-img-wrap { width: 100%; aspect-ratio: 9/16; background: #eee; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    #pane-post.active .post-card-img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    #pane-post.active .post-card-body { padding: 8px 10px; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    #pane-post.active .post-card-id { font-weight: 600; font-size: 12px; color: #495057; margin-bottom: 4px; }
+    #pane-post.active .post-card-content { flex: 1; font-size: 11px; color: #212529; line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+    #pane-post.active .post-card-footer { margin-top: 4px; padding-top: 4px; border-top: 1px solid #eee; font-size: 11px; color: #6c757d; }
+    #pane-post.active .post-card-status { padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+    #pane-post.active .post-card-status.pending { background: #e9ecef; color: #495057; }
+    #pane-post.active .post-card-status.running { background: #cce5ff; color: #004085; }
+    #pane-post.active .post-card-status.done { background: #d4edda; color: #155724; }
+    #pane-post.active .post-card-status.failed { background: #f8d7da; color: #721c24; }
+    #pane-post.active .post-list-empty { padding: 24px; text-align: center; color: #6c757d; font-size: 14px; }
+    /* Rollback attack pane */
+    .panes:has(#pane-rollback.active) { overflow: hidden; height: calc(100vh - 52px); min-height: 0; }
+    #pane-rollback.active { margin: -1.5rem -1.5rem 0 -1.5rem; padding: 0; height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; }
+    #pane-rollback.active .rollback-layout { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    #pane-rollback.active .rollback-left { flex: 1; min-width: 0; background: #f8f9fa; }
+    #pane-rollback.active #rollback-graph { width: 100%; height: 100%; min-height: 200px; }
+    #pane-rollback.active .rollback-right { width: 320px; flex-shrink: 0; border-left: 1px solid #dee2e6; background: #fff; overflow: auto; padding: 12px; font-size: 13px; line-height: 1.5; }
+    #pane-rollback.active .rollback-display-settings { padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid #dee2e6; }
+    #pane-rollback.active .rollback-display-settings h4 { margin: 0 0 10px 0; font-size: 13px; }
+    #pane-rollback.active .rollback-controls h4 { margin: 0 0 10px 0; font-size: 13px; }
+    #pane-rollback.active .rollback-controls .button-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    #pane-rollback.active .rollback-controls button { padding: 6px 12px; font-size: 12px; border: 1px solid #dee2e6; border-radius: 4px; background: #fff; cursor: pointer; }
+    #pane-rollback.active .rollback-controls button:hover { background: #f8f9fa; }
+    #pane-rollback.active .rollback-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #pane-rollback.active .rollback-controls .selected-nodes { margin-top: 10px; font-size: 12px; color: #495057; }
+    #pane-rollback.active .rollback-controls .selected-nodes .node-label { display: block; margin-top: 4px; padding: 6px 8px; background: #f1f3f5; border-radius: 4px; word-break: break-word; overflow-wrap: break-word; white-space: normal; }
+    #pane-rollback.active .rollback-controls .selected-nodes .node-label:empty { display: none; }
+    #pane-rollback.active .rollback-controls .path-result { margin-top: 10px; padding: 8px; background: #e7f3ff; border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto; }
+    #pane-rollback.active .rollback-detail h3 { margin: 10px 0 8px 0; font-size: 14px; }
+    #pane-rollback.active .rollback-detail .empty { color: #868e96; }
+    #pane-rollback.active .rollback-detail dt { font-size: 11px; color: #868e96; margin: 8px 0 2px 0; }
+    #pane-rollback.active .rollback-detail dd { margin: 0; }
+    #pane-rollback.active .rollback-detail .action-json { background: #f1f3f5; padding: 8px; border-radius: 4px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+    #pane-rollback.active .rollback-empty { padding: 24px; text-align: center; color: #6c757d; }
+    /* Rollback Attack pane: same layout as Graph Build */
+    .panes:has(#pane-rollback-attack.active) { overflow: hidden; height: calc(100vh - 52px); min-height: 0; }
+    #pane-rollback-attack.active { margin: -1.5rem -1.5rem 0 -1.5rem; padding: 0; height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; }
+    #pane-rollback-attack.active .rollback-attack-layout { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    #pane-rollback-attack.active .rollback-attack-left { flex: 1; min-width: 0; background: #f8f9fa; }
+    #pane-rollback-attack.active .rollback-attack-right { width: 320px; flex-shrink: 0; border-left: 1px solid #dee2e6; background: #fff; overflow: auto; padding: 12px; font-size: 13px; line-height: 1.5; }
+    #pane-rollback-attack.active .rollback-attack-controls h4 { margin: 0 0 10px 0; font-size: 13px; }
+    #pane-rollback-attack.active .rollback-attack-controls .button-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    #pane-rollback-attack.active .rollback-attack-controls button { padding: 6px 12px; font-size: 12px; border: 1px solid #dee2e6; border-radius: 4px; background: #fff; cursor: pointer; }
+    #pane-rollback-attack.active .rollback-attack-controls button:hover { background: #f8f9fa; }
+    #pane-rollback-attack.active .rollback-attack-controls button.primary { background: #007bff; color: #fff; border-color: #007bff; }
+    #pane-rollback-attack.active .rollback-attack-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <a href="#" data-tab="env" class="active">Environment Info</a>
+    <a href="#" data-tab="tasks">Task Collection</a>
+    <a href="#" data-tab="post">Post Processing</a>
+    <a href="#" data-tab="rollback">Graph Build</a>
+    <a href="#" data-tab="rollback-attack">Rollback Attack</a>
+  </nav>
+  <main class="panes">
+    <section id="pane-env" class="pane active">
+      <div class="form-row">
+        <label>Project Directory</label>
+        <input type="text" id="env-project-root" placeholder="Default: program directory/autoglm_runs, all project data will be stored here">
+        <button type="button" id="env-select-dir">Select Directory</button>
+        <span id="env-project-msg" class="msg"></span>
+      </div>
+      <div class="form-row">
+        <label>Update Data Directory</label>
+        <input type="text" id="env-update-data-root" placeholder="Optional, for incremental update">
+        <button type="button" id="env-select-update-dir">Select Directory</button>
+        <span id="env-update-data-msg" class="msg"></span>
+      </div>
+      <div class="form-row">
+        <label>AutoGLM API Key</label>
+        <input type="text" id="env-autoglm-key" placeholder="">
+      </div>
+      <div class="form-row">
+        <label>AutoGLM Base URL</label>
+        <input type="text" id="env-autoglm-base" placeholder="">
+      </div>
+      <div class="form-row">
+        <label>Post Processing Coze API Token</label>
+        <input type="text" id="env-post-token" placeholder="Coze Open Platform API Token for uploading images and calling workflows">
+      </div>
+      <div class="form-row">
+        <label>Post Processing Workflow ID</label>
+        <input type="text" id="env-post-id" placeholder="Workflow ID after publishing">
+      </div>
+      <div class="form-row">
+        <label>Path Generation Workflow ID</label>
+        <input type="text" id="env-path-gen-id" placeholder="Workflow ID after publishing">
+      </div>
+      <div class="form-actions">
+        <button type="button" id="env-save">Save Configuration</button>
+        <span id="env-save-msg" class="msg"></span>
+      </div>
+    </section>
+    <section id="pane-tasks" class="pane">
+      <div class="tasks-layout">
+        <div class="tasks-left">
+          <div class="tasks-cards-wrap">
+            <div class="tasks-cards" id="tasks-list">
+              <div id="tasks-list-empty" class="tasks-list-empty">No tasks yet. Please select 'AndroidWorld Generate' and click 'Generate Tasks', or select 'Custom Tasks' and import CSV.</div>
+            </div>
+          </div>
+          <div class="tasks-progress">
+            <div class="overall" id="tasks-progress-overall">Total Progress: 0 / 0</div>
+            <div class="current" id="tasks-progress-current">Current: Not Running</div>
+          </div>
+        </div>
+        <div class="tasks-right">
+          <div class="tasks-control">
+            <label style="display:block;margin-bottom:6px;"><strong>Data</strong></label>
+            <select id="tasks-data-mode" style="width:100%;padding:6px;font-size:13px;margin-bottom:10px;">
+              <option value="base">Base</option>
+              <option value="incremental">Incremental</option>
+            </select>
+            <span style="font-weight:600;font-size:13px;">Task Source</span>
+            <label><input type="radio" name="task-mode" value="androidworld" checked> AndroidWorld Generate</label>
+            <label><input type="radio" name="task-mode" value="custom"> Custom Tasks (CSV)</label>
+            <div class="ctrl-btns" id="tasks-ctrl-btns">
+              <span id="tasks-androidworld-btns">
+                <button type="button" id="tasks-create-aw">Generate Tasks</button>
+              </span>
+              <span id="tasks-custom-btns" style="display:none;">
+                <input type="file" id="tasks-csv-file" accept=".csv" style="display:none">
+                <button type="button" id="tasks-import-csv">Select and Import CSV</button>
+              </span>
+              <button type="button" id="tasks-start" class="primary">Start Running</button>
+              <button type="button" id="tasks-refresh">Refresh</button>
+              <span id="tasks-ctrl-msg" class="msg" style="display:block;margin-top:8px;font-size:12px;"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section id="pane-post" class="pane">
+      <div class="post-layout">
+        <div class="post-left">
+          <div class="post-cards-wrap">
+            <div class="post-cards" id="post-list">
+              <div id="post-list-empty" class="post-list-empty">No screenshot records yet. Please run tasks in Task Collection first, generate task_xxx/steps, then refresh.</div>
+            </div>
+          </div>
+          <div class="post-progress">
+            <div class="overall" id="post-progress-overall">Total Progress: 0 / 0 (done / failed / pending)</div>
+            <div class="current" id="post-progress-current">Current: Not Running</div>
+          </div>
+        </div>
+        <div class="post-right">
+          <div class="post-control">
+            <label style="display:block;margin-bottom:6px;"><strong>Data</strong></label>
+            <select id="post-data-mode" style="width:100%;padding:6px;font-size:13px;margin-bottom:10px;">
+              <option value="base">Base</option>
+              <option value="incremental">Incremental</option>
+            </select>
+            <button type="button" id="post-start" class="primary">Start Processing</button>
+            <button type="button" id="post-retry-failed">Retry Failed Only</button>
+            <button type="button" id="post-refresh">Refresh</button>
+            <span id="post-ctrl-msg" class="msg" style="display:block;margin-top:8px;font-size:12px;"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section id="pane-rollback" class="pane">
+      <div class="rollback-layout">
+        <div class="rollback-left">
+          <div id="rollback-graph"></div>
+          <div id="rollback-empty" class="rollback-empty" style="display:none;">No graph collection yet. Please ensure there are completed (success) tasks in task_list.csv under the project directory, then click 'Generate Graph Collection' on the right.</div>
+        </div>
+        <div class="rollback-right">
+          <div class="rollback-display-settings">
+            <label style="display:block;margin-bottom:6px;"><strong>Data</strong></label>
+            <select id="rollback-data-mode" style="width:100%;padding:6px;font-size:13px;margin-bottom:10px;">
+              <option value="base">Base</option>
+              <option value="incremental">Incremental</option>
+            </select>
+            <label style="display:block;margin-bottom:6px;"><strong>Select Graph Collection</strong></label>
+            <label style="display:inline-block;margin-right:12px;"><input type="radio" name="rollback-variant" value="unmerged" checked> Unmerged</label>
+            <label style="display:inline-block;"><input type="radio" name="rollback-variant" value="merged"> Merged</label>
+            <label style="display:block;margin:10px 0 6px 0;"><strong>Select Display</strong></label>
+            <select id="rollback-index" style="width:100%;padding:6px;font-size:13px;">
+              <option value="all">All</option>
+            </select>
+          </div>
+          <div class="rollback-controls">
+            <h4>Actions</h4>
+            <div class="button-group">
+              <button type="button" id="rollback-generate" class="primary">Generate Graph Collection</button>
+              <button type="button" id="rollback-refresh">Refresh</button>
+            </div>
+            <div class="rollback-merge-option" style="margin-top:10px;margin-bottom:6px;">
+              <label for="rollback-merge-threshold" style="font-size:12px;">Merge Threshold (0~1):</label>
+              <input type="number" id="rollback-merge-threshold" min="0.01" max="1" step="0.05" value="0.9" style="width:70px;padding:4px;font-size:12px;margin-left:6px;" title="Merge only when similarity ≥ this value, default 0.9">
+            </div>
+            <div class="button-group">
+              <button type="button" id="rollback-merge">Merge Graph Collection</button>
+            </div>
+            <span id="rollback-ctrl-msg" class="msg" style="display:block;margin-top:8px;font-size:12px;"></span>
+            <div class="button-group" style="margin-top:10px;">
+              <button type="button" id="rollback-incremental-merge">Incremental Update</button>
+            </div>
+            <div class="button-group" style="margin-top:10px;">
+              <button type="button" id="rollback-find-path" disabled>Generate Candidate Paths</button>
+              <button type="button" id="rollback-clear">Clear Selection</button>
+              <button type="button" id="rollback-same-endpoints">Same Endpoint Edges</button>
+            </div>
+            <div id="rollback-selected-nodes" class="selected-nodes" style="display:none;"><strong>Selected Nodes:</strong><div id="rollback-node1" class="node-label"></div><div id="rollback-node2" class="node-label"></div></div>
+            <div id="rollback-path-result" class="path-result" style="display:none;"></div>
+          </div>
+          <div class="rollback-detail">
+            <h3>Details</h3>
+            <div id="rollback-detail-content"><p class="empty" id="rollback-detail-hint">Click a node or edge to view details</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section id="pane-rollback-attack" class="pane">
+      <div class="rollback-attack-layout">
+        <div class="rollback-attack-left">
+          <div id="rollback-attack-display" style="width:100%;height:100%;min-height:200px;"></div>
+        </div>
+        <div class="rollback-attack-right">
+          <div class="rollback-attack-controls">
+            <h4>Path Generation</h4>
+            <label style="display:block;margin-bottom:6px;"><strong>Select JSON</strong></label>
+            <input type="file" id="rollback-attack-json-file" accept=".json" style="width:100%;margin-bottom:10px;font-size:12px;">
+            <span id="rollback-attack-json-name" style="font-size:11px;color:#6c757d;display:block;margin-bottom:10px;">No file selected</span>
+            <label style="display:block;margin-bottom:6px;"><strong>Goal</strong></label>
+            <textarea id="rollback-attack-goal" rows="3" placeholder="e.g. Buy 5 pairs of gloves on Taobao" style="width:100%;padding:6px;font-size:12px;resize:vertical;margin-bottom:10px;"></textarea>
+            <div class="button-group">
+              <button type="button" id="rollback-attack-request" class="primary">Request</button>
+            </div>
+            <span id="rollback-attack-msg" class="msg" style="display:block;margin-top:8px;font-size:12px;"></span>
+            <h4 style="margin-top:16px;">Replay</h4>
+            <div class="button-group">
+              <button type="button" id="rollback-attack-replay">Replay Task</button>
+            </div>
+            <p id="rollback-attack-replay-hint" style="margin-top:6px;font-size:11px;color:#6c757d;">Select two nodes and find path on Graph Build first, then click here to replay.</p>
+            <h4 style="margin-top:16px;">Statistics</h4>
+            <div class="button-group">
+              <button type="button" id="rollback-attack-display-stats">Display Statistics</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <div id="stats-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;justify-content:center;align-items:center;flex-direction:column;">
+      <div id="stats-modal" style="background:#fff;border-radius:8px;max-width:90vw;max-height:85vh;overflow:auto;padding:16px;box-shadow:0 4px 20px rgba(0,0,0,0.2);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <strong>Graph Collection Statistics</strong>
+          <button type="button" id="stats-modal-close" style="padding:4px 10px;cursor:pointer;">Close</button>
+        </div>
+        <div id="stats-modal-content" style="font-size:12px;overflow:auto;"></div>
+      </div>
+    </div>
+  </main>
+  <script>
+    (function() {
+      function showMsg(elId, text, isErr) {
+        var el = document.getElementById(elId);
+        if (!el) return;
+        el.textContent = text || '';
+        el.className = 'msg' + (text ? (isErr ? ' err' : ' ok') : '');
+      }
+      function fillEnvForm(data) {
+        var root = data.project_root || '';
+        var c = data.config || {};
+        document.getElementById('env-project-root').value = root;
+        document.getElementById('env-autoglm-key').value = (c.autoglm && c.autoglm.api_key) || '';
+        document.getElementById('env-autoglm-base').value = (c.autoglm && c.autoglm.base_url) || '';
+        document.getElementById('env-post-token').value = (c.post_processing && c.post_processing.coze_api_token) || '';
+        document.getElementById('env-post-id').value = (c.post_processing && c.post_processing.workflow_id) || '';
+        document.getElementById('env-path-gen-id').value = (c.post_processing && c.post_processing.path_generation_workflow_id) || '';
+        document.getElementById('env-update-data-root').value = (c.update_data_directory != null ? String(c.update_data_directory) : '') || '';
+      }
+      function loadConfig() {
+        fetch('/api/config').then(function(r) { return r.json(); }).then(fillEnvForm).catch(function() {
+          showMsg('env-project-msg', 'Failed to load configuration', true);
+        });
+      }
+      document.querySelectorAll('.nav a').forEach(function(a) {
+        a.addEventListener('click', function(e) {
+          e.preventDefault();
+          var tab = a.getAttribute('data-tab');
+          document.querySelectorAll('.nav a').forEach(function(x) { x.classList.remove('active'); });
+          document.querySelectorAll('.pane').forEach(function(x) { x.classList.remove('active'); });
+          a.classList.add('active');
+          var pane = document.getElementById('pane-' + tab);
+          if (pane) pane.classList.add('active');
+          if (tab === 'env') loadConfig();
+          if (tab === 'tasks') loadTaskList();
+          if (tab === 'post') loadPostList();
+          if (tab === 'rollback') loadRollbackGraph();
+          if (tab === 'rollback-attack') { /* empty for now */ }
+        });
+      });
+      if (window.location.hash === '#rollback-attack') {
+        document.querySelectorAll('.nav a').forEach(function(x) { x.classList.remove('active'); });
+        document.querySelectorAll('.pane').forEach(function(x) { x.classList.remove('active'); });
+        var nav = document.querySelector('.nav a[data-tab="rollback-attack"]');
+        var pane = document.getElementById('pane-rollback-attack');
+        if (nav) nav.classList.add('active');
+        if (pane) pane.classList.add('active');
+      }
+      if (window.location.hash === '#rollback') {
+        document.querySelectorAll('.nav a').forEach(function(x) { x.classList.remove('active'); });
+        document.querySelectorAll('.pane').forEach(function(x) { x.classList.remove('active'); });
+        var rollbackNav = document.querySelector('.nav a[data-tab="rollback"]');
+        var rollbackPane = document.getElementById('pane-rollback');
+        if (rollbackNav) rollbackNav.classList.add('active');
+        if (rollbackPane) { rollbackPane.classList.add('active'); loadRollbackGraph(); }
+      }
+      var taskListPollTimer = null;
+      var postListPollTimer = null;
+      function getTaskMode() { return document.querySelector('input[name="task-mode"]:checked').value; }
+      function getTasksDataMode() { return (document.getElementById('tasks-data-mode') && document.getElementById('tasks-data-mode').value) || 'base'; }
+      function loadTaskList() {
+        var mode = getTaskMode();
+        var dataMode = getTasksDataMode();
+        fetch('/api/task-list?mode=' + encodeURIComponent(mode) + '&data_mode=' + encodeURIComponent(dataMode)).then(function(r) { return r.json(); }).then(function(data) {
+          if (data.error) { renderTaskListEmpty(data.error); return; }
+          renderTaskList(data.tasks || [], data.mode);
+          renderProgress(data.total, data.done_count, data.current_task, data.run_state);
+          if (data.run_state && data.run_state.running) startTaskListPoll(); else stopTaskListPoll();
+        }).catch(function() { renderTaskListEmpty('Failed to load'); });
+      }
+      function renderTaskList(tasks, mode) {
+        var container = document.getElementById('tasks-list');
+        var emptyEl = document.getElementById('tasks-list-empty');
+        if (!tasks.length) {
+          emptyEl.style.display = 'block';
+          emptyEl.textContent = mode === 'custom' ? 'No tasks yet. Please click "Select and Import CSV" to upload custom_task_list.csv.' : 'No tasks yet. Please click "Generate Tasks" to generate from AndroidWorld.';
+          var old = container.querySelectorAll('.task-card');
+          for (var i = 0; i < old.length; i++) old[i].remove();
+          return;
+        }
+        emptyEl.style.display = 'none';
+        var old = container.querySelectorAll('.task-card');
+        for (var i = 0; i < old.length; i++) old[i].remove();
+        var frag = document.createDocumentFragment();
+        tasks.forEach(function(t) {
+          var status = (t.status || '').toLowerCase();
+          var goal = (t.task_goal || t.task_name || t.task_id || '').toString();
+          var card = document.createElement('div');
+          card.className = 'task-card';
+          card.innerHTML = '<div class="task-card-id">' + escapeHtml(t.task_id || '') + '</div>' +
+            '<div class="task-card-goal" title="' + escapeHtml(goal) + '">' + escapeHtml(goal) + '</div>' +
+            '<div class="task-card-footer">' +
+            '<span class="task-card-status ' + status + '">' + escapeHtml(t.status || '') + '</span>' +
+            (t.duration_seconds ? '<span class="task-card-duration">' + escapeHtml(String(t.duration_seconds)) + 's</span>' : '') +
+            '</div>';
+          frag.appendChild(card);
+        });
+        container.insertBefore(frag, emptyEl);
+      }
+      function renderTaskListEmpty(msg) {
+        var emptyEl = document.getElementById('tasks-list-empty');
+        emptyEl.style.display = 'block';
+        emptyEl.textContent = msg || 'No tasks yet';
+        var items = document.getElementById('tasks-list').querySelectorAll('.task-card');
+        for (var i = 0; i < items.length; i++) items[i].remove();
+      }
+      function escapeHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+      function renderProgress(total, doneCount, currentTask, runState) {
+        document.getElementById('tasks-progress-overall').textContent = 'Total Progress: ' + (doneCount || 0) + ' / ' + (total || 0);
+        if (currentTask && runState && runState.running) {
+          var g = (currentTask.task_goal || currentTask.task_name || currentTask.task_id || '').toString();
+          if (g.length > 50) g = g.slice(0, 47) + '...';
+          document.getElementById('tasks-progress-current').textContent = 'Current: ' + (currentTask.task_id || '') + ' - ' + g;
+        } else {
+          document.getElementById('tasks-progress-current').textContent = 'Current: Not Running';
+        }
+      }
+      function startTaskListPoll() {
+        if (taskListPollTimer) return;
+        taskListPollTimer = setInterval(function() { loadTaskList(); }, 5000);
+      }
+      function stopTaskListPoll() {
+        if (taskListPollTimer) { clearInterval(taskListPollTimer); taskListPollTimer = null; }
+      }
+      document.querySelectorAll('input[name="task-mode"]').forEach(function(r) {
+        r.addEventListener('change', function() {
+          var mode = getTaskMode();
+          document.getElementById('tasks-androidworld-btns').style.display = mode === 'androidworld' ? 'inline' : 'none';
+          document.getElementById('tasks-custom-btns').style.display = mode === 'custom' ? 'inline' : 'none';
+          loadTaskList();
+        });
+      });
+      document.getElementById('tasks-create-aw').addEventListener('click', function() {
+        showMsg('tasks-ctrl-msg', 'Generating...');
+        fetch('/api/tasks/create-androidworld', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data_mode: getTasksDataMode() }) })
+          .then(function(r) { return r.json(); }).then(function(res) {
+            if (res.ok) { showMsg('tasks-ctrl-msg', res.message || 'Generated'); loadTaskList(); }
+            else { showMsg('tasks-ctrl-msg', res.error || 'Failed', true); }
+          }).catch(function() { showMsg('tasks-ctrl-msg', 'Request failed', true); });
+      });
+      document.getElementById('tasks-import-csv').addEventListener('click', function() { document.getElementById('tasks-csv-file').click(); });
+      document.getElementById('tasks-csv-file').addEventListener('change', function() {
+        var f = this.files && this.files[0];
+        if (!f) return;
+        showMsg('tasks-ctrl-msg', 'Uploading...');
+        var reader = new FileReader();
+        reader.onload = function() {
+          var csvText = typeof reader.result === 'string' ? reader.result : new TextDecoder('utf-8').decode(reader.result);
+          fetch('/api/tasks/import-custom-csv', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ csv_text: csvText, data_mode: getTasksDataMode() }) })
+            .then(function(r) { return r.json(); }).then(function(res) {
+              if (res.ok) { showMsg('tasks-ctrl-msg', res.message || 'Imported'); loadTaskList(); }
+              else { showMsg('tasks-ctrl-msg', res.error || 'Failed', true); }
+            }).catch(function() { showMsg('tasks-ctrl-msg', 'Request failed', true); });
+        };
+        reader.readAsText(f, 'UTF-8');
+        this.value = '';
+      });
+      document.getElementById('tasks-start').addEventListener('click', function() {
+        var mode = getTaskMode();
+        showMsg('tasks-ctrl-msg', 'Starting...');
+        fetch('/api/tasks/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: mode, data_mode: getTasksDataMode() }) })
+          .then(function(r) { return r.json(); }).then(function(res) {
+            if (res.ok) { showMsg('tasks-ctrl-msg', res.message || 'Started'); startTaskListPoll(); loadTaskList(); }
+            else { showMsg('tasks-ctrl-msg', res.error || 'Failed', true); }
+          }).catch(function() { showMsg('tasks-ctrl-msg', 'Request failed', true); });
+      });
+      document.getElementById('tasks-refresh').addEventListener('click', function() { showMsg('tasks-ctrl-msg', ''); loadTaskList(); });
+      document.getElementById('tasks-data-mode').addEventListener('change', function() { loadTaskList(); });
+      function getPostDataMode() { return (document.getElementById('post-data-mode') && document.getElementById('post-data-mode').value) || 'base'; }
+      function loadPostList() {
+        var dataMode = getPostDataMode();
+        fetch('/api/post-processing/list?data_mode=' + encodeURIComponent(dataMode)).then(function(r) { return r.json(); }).then(function(data) {
+          if (data.error) { renderPostListEmpty(data.error); return; }
+          renderPostList(data.rows || []);
+          renderPostProgress(data.total, data.done_count, data.failed_count, data.pending_count, data.current_row, data.run_state);
+          if (data.run_state && data.run_state.running) startPostListPoll(); else stopPostListPoll();
+        }).catch(function() { renderPostListEmpty('Failed to load'); });
+      }
+      function renderPostList(rows) {
+        var container = document.getElementById('post-list');
+        var emptyEl = document.getElementById('post-list-empty');
+        if (!rows.length) {
+          emptyEl.style.display = 'block';
+          emptyEl.textContent = 'No screenshot records yet. Please run tasks in Task Collection first, generate task_xxx/steps, then refresh.';
+          var old = container.querySelectorAll('.post-card');
+          for (var i = 0; i < old.length; i++) old[i].remove();
+          return;
+        }
+        emptyEl.style.display = 'none';
+        var old = container.querySelectorAll('.post-card');
+        for (var i = 0; i < old.length; i++) old[i].remove();
+        var frag = document.createDocumentFragment();
+        rows.forEach(function(r) {
+          var status = (r.status || '').toLowerCase();
+          var content = (r.app_name && r.page_name) ? (r.app_name + ' / ' + r.page_name + (r.page_description ? ' ' + String(r.page_description).slice(0, 20) + (r.page_description.length > 20 ? '…' : '') : '')) : (r.error_message || '');
+          if (content.length > 80) content = content.slice(0, 77) + '...';
+          var stepStr = String(r.step_number != null ? r.step_number : '').padStart(3, '0');
+          var dataMode = getPostDataMode();
+          var imgUrl = '/api/post-processing/image?task_id=' + encodeURIComponent(r.task_id || '') + '&step=' + encodeURIComponent(r.step_number != null ? r.step_number : '') + '&data_mode=' + encodeURIComponent(dataMode);
+          var card = document.createElement('div');
+          card.className = 'post-card';
+          card.innerHTML = '<div class="post-card-img-wrap"><img class="post-card-img" src="' + escapeHtml(imgUrl) + '" alt="" loading="lazy"></div>' +
+            '<div class="post-card-body">' +
+            '<div class="post-card-id">' + escapeHtml(r.task_id || '') + ' step_' + stepStr + '</div>' +
+            '<div class="post-card-content" title="' + escapeHtml(content) + '">' + escapeHtml(content || '-') + '</div>' +
+            '<div class="post-card-footer"><span class="post-card-status ' + status + '">' + escapeHtml(r.status || '') + '</span></div>' +
+            '</div>';
+          frag.appendChild(card);
+        });
+        container.insertBefore(frag, emptyEl);
+      }
+      function renderPostListEmpty(msg) {
+        var emptyEl = document.getElementById('post-list-empty');
+        emptyEl.style.display = 'block';
+        emptyEl.textContent = msg || 'No records yet';
+        var items = document.getElementById('post-list').querySelectorAll('.post-card');
+        for (var i = 0; i < items.length; i++) items[i].remove();
+      }
+      function renderPostProgress(total, doneCount, failedCount, pendingCount, currentRow, runState) {
+        var s = 'Total Progress: ' + (doneCount || 0) + ' / ' + (total || 0) + ' (done ' + (doneCount || 0) + ' / failed ' + (failedCount || 0) + ' / pending ' + (pendingCount || 0) + ')';
+        document.getElementById('post-progress-overall').textContent = s;
+        if (currentRow && runState && runState.running) {
+          document.getElementById('post-progress-current').textContent = 'Current: ' + (currentRow.task_id || '') + ' step_' + String(currentRow.step_number || '').padStart(3, '0');
+        } else {
+          document.getElementById('post-progress-current').textContent = 'Current: Not Running';
+        }
+      }
+      function startPostListPoll() {
+        if (postListPollTimer) return;
+        postListPollTimer = setInterval(function() { loadPostList(); }, 5000);
+      }
+      function stopPostListPoll() {
+        if (postListPollTimer) { clearInterval(postListPollTimer); postListPollTimer = null; }
+      }
+      document.getElementById('post-start').addEventListener('click', function() {
+        showMsg('post-ctrl-msg', 'Starting...');
+        fetch('/api/post-processing/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data_mode: getPostDataMode() }) })
+          .then(function(r) { return r.json(); }).then(function(res) {
+            if (res.ok) { showMsg('post-ctrl-msg', res.message || 'Started'); startPostListPoll(); loadPostList(); }
+            else { showMsg('post-ctrl-msg', res.error || 'Failed', true); }
+          }).catch(function() { showMsg('post-ctrl-msg', 'Request failed', true); });
+      });
+      document.getElementById('post-retry-failed').addEventListener('click', function() {
+        showMsg('post-ctrl-msg', 'Starting...');
+        fetch('/api/post-processing/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ retry_failed: true, data_mode: getPostDataMode() }) })
+          .then(function(r) { return r.json(); }).then(function(res) {
+            if (res.ok) { showMsg('post-ctrl-msg', res.message || 'Started'); startPostListPoll(); loadPostList(); }
+            else { showMsg('post-ctrl-msg', res.error || 'Failed', true); }
+          }).catch(function() { showMsg('post-ctrl-msg', 'Request failed', true); });
+      });
+      document.getElementById('post-refresh').addEventListener('click', function() { showMsg('post-ctrl-msg', ''); loadPostList(); });
+      document.getElementById('post-data-mode').addEventListener('change', function() { loadPostList(); });
+      var rollbackGraphLoaded = false;
+      var rollbackNetwork = null;
+      var rollbackNodes = null;
+      var rollbackEdges = null;
+      var rollbackGraphList = [];
+      var rollbackSelectedNodes = [];
+      var rollbackPathHighlighted = [];
+      var rollbackPathEdges = [];
+      var NODE_COLORS_ROLLBACK = ["#97C2FC", "#FAA076", "#7AEFA0", "#E6A0C0", "#C5B3E6", "#FFE066", "#88D9E6", "#F5B7B1"];
+      function rollbackNodeFullText(node) {
+        if (!node) return '';
+        var parts = [];
+        if (node.app_name) parts.push(node.app_name);
+        if (node.page_name) parts.push(node.page_name);
+        if (node.page_description) parts.push(node.page_description);
+        if (node.differentiated_content) {
+          var diff = node.differentiated_content;
+          parts.push(Array.isArray(diff) ? diff.join('\n') : diff);
+        }
+        return parts.length ? parts.join('\n') : (node.title || node.label || '');
+      }
+      function parseRollbackPrefixedId(prefixed) {
+        var sep = prefixed.indexOf('|');
+        if (sep < 0) return [-1, prefixed];
+        return [parseInt(prefixed.slice(0, sep), 10), prefixed.slice(sep + 1)];
+      }
+      function findRollbackPath(fromNodeId, toNodeId) {
+        var fromP = parseRollbackPrefixedId(fromNodeId);
+        var toP = parseRollbackPrefixedId(toNodeId);
+        if (fromP[0] !== toP[0] || fromP[0] < 0) return null;
+        var graphIdx = fromP[0];
+        var g = rollbackGraphList[graphIdx];
+        if (!g) return null;
+        var adj = {};
+        g.nodes.forEach(function(n) { adj[n.id] = []; });
+        g.edges.forEach(function(e) { if (!adj[e.from]) adj[e.from] = []; adj[e.from].push({ to: e.to, edge: e }); });
+        var queue = [{ node: fromP[1], path: [], edges: [] }];
+        var visited = new Set();
+        visited.add(fromP[1]);
+        while (queue.length > 0) {
+          var current = queue.shift();
+          if (current.node === toP[1]) return { nodes: [fromP[1]].concat(current.path), edges: current.edges };
+          var neighbors = adj[current.node] || [];
+          for (var i = 0; i < neighbors.length; i++) {
+            var neighbor = neighbors[i];
+            if (!visited.has(neighbor.to)) {
+              visited.add(neighbor.to);
+              queue.push({ node: neighbor.to, path: current.path.concat([neighbor.to]), edges: current.edges.concat([neighbor.edge]) });
+            }
+          }
+        }
+        return null;
+      }
+      function getRollbackNodeBg(nodeId) {
+        if (!rollbackNodes) throw new Error('Graph collection data error: node data not loaded.');
+        var node = rollbackNodes.get(nodeId);
+        if (!node || node.color == null || node.color === '') throw new Error('Graph collection data error: node missing color field, please click "Generate Graph Collection" again.');
+        return typeof node.color === 'object' ? node.color.background : node.color;
+      }
+      function applyRollbackNodeStyle(nodeId, isSelected) {
+        if (!rollbackNodes) return;
+        var bg = getRollbackNodeBg(nodeId);
+        if (isSelected) {
+          rollbackNodes.update({ id: nodeId, color: { background: bg, border: '#000', highlight: { background: bg, border: '#000' }, hover: { background: bg, border: '#000' } }, borderWidth: 3 });
+        } else {
+          rollbackNodes.update({ id: nodeId, color: bg, borderWidth: 2 });
+        }
+      }
+      function clearRollbackPathHighlight() {
+        if (!rollbackNodes || !rollbackEdges) return;
+        rollbackPathHighlighted.forEach(function(nodeId) {
+          var isSelected = rollbackSelectedNodes.indexOf(nodeId) >= 0;
+          applyRollbackNodeStyle(nodeId, isSelected);
+        });
+        rollbackPathEdges.forEach(function(edgeId) {
+          var edge = rollbackEdges.get(edgeId);
+          if (edge) rollbackEdges.update({ id: edgeId, color: { color: '#848484', highlight: '#848484' }, width: 2 });
+        });
+        rollbackPathHighlighted = [];
+        rollbackPathEdges = [];
+      }
+      function highlightRollbackPath(path) {
+        clearRollbackPathHighlight();
+        if (!path || !rollbackNodes || !rollbackEdges) return;
+        var graphPrefix = rollbackSelectedNodes[0].split('|')[0] + '|';
+        path.nodes.forEach(function(nodeId, idx) {
+          var fullId = graphPrefix + nodeId;
+          var node = rollbackNodes.get(fullId);
+          if (node) {
+            var bg = getRollbackNodeBg(fullId);
+            var isEndPoint = idx === 0 || idx === path.nodes.length - 1;
+            var borderColor = isEndPoint ? '#000' : '#848484';
+            rollbackNodes.update({ id: fullId, color: { background: bg, border: borderColor, highlight: { background: bg, border: borderColor }, hover: { background: bg, border: borderColor } }, borderWidth: 3 });
+            rollbackPathHighlighted.push(fullId);
+          }
+        });
+        path.edges.forEach(function(edge) {
+          var fullEdgeId = graphPrefix + edge.id;
+          try {
+            var edgeObj = rollbackEdges.get(fullEdgeId);
+            if (edgeObj) {
+              rollbackEdges.update({ id: fullEdgeId, color: { color: '#ff6b6b', highlight: '#ff6b6b' }, width: 4 });
+              rollbackPathEdges.push(fullEdgeId);
+            }
+          } catch (e) {}
+        });
+      }
+      function updateRollbackSelection() {
+        var btnFindPath = document.getElementById('rollback-find-path');
+        var selectedDiv = document.getElementById('rollback-selected-nodes');
+        var node1Display = document.getElementById('rollback-node1');
+        var node2Display = document.getElementById('rollback-node2');
+        var pathResult = document.getElementById('rollback-path-result');
+        if (!btnFindPath) return;
+        if (rollbackSelectedNodes.length === 0) {
+          btnFindPath.disabled = true;
+          selectedDiv.style.display = 'none';
+          clearRollbackPathHighlight();
+          pathResult.style.display = 'none';
+        } else if (rollbackSelectedNodes.length === 1) {
+          btnFindPath.disabled = true;
+          selectedDiv.style.display = 'block';
+          var node1 = rollbackNodes ? rollbackNodes.get(rollbackSelectedNodes[0]) : null;
+          node1Display.textContent = node1 ? rollbackNodeFullText(node1) : rollbackSelectedNodes[0];
+          node2Display.textContent = '';
+        } else {
+          btnFindPath.disabled = false;
+          selectedDiv.style.display = 'block';
+          var n1 = rollbackNodes ? rollbackNodes.get(rollbackSelectedNodes[0]) : null;
+          var n2 = rollbackNodes ? rollbackNodes.get(rollbackSelectedNodes[1]) : null;
+          node1Display.textContent = n1 ? rollbackNodeFullText(n1) : rollbackSelectedNodes[0];
+          node2Display.textContent = n2 ? rollbackNodeFullText(n2) : rollbackSelectedNodes[1];
+        }
+      }
+      function showRollbackDetail(idx, type, item) {
+        var content = document.getElementById('rollback-detail-content');
+        if (!content) return;
+        if (!item || idx < 0 || idx >= rollbackGraphList.length) {
+          content.innerHTML = '<p class="empty" id="rollback-detail-hint">Click a node or edge to view details</p>';
+          return;
+        }
+        var g = rollbackGraphList[idx];
+        var data = type === 'node' ? g.nodes.find(function(n) { return n.id === item; }) : g.edges.find(function(e) { return e.id === item; });
+        if (!data) return;
+        function esc(s) { if (s == null || s === '') return '-'; s = String(s); return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+        function fmtNode(d) {
+          var idDisplay = (d.id != null && d.id !== '') ? esc(String(d.id).replace(/\0/g, ' | ')) : '-';
+          var diffDisplay = d.differentiated_content != null ? (Array.isArray(d.differentiated_content) ? d.differentiated_content.join('\n') : d.differentiated_content) : '';
+          return '<div class="detail-section"><dt>Node ID</dt><dd style="word-break:break-all;font-family:monospace;font-size:11px;">' + idDisplay + '</dd><dt>APP Name</dt><dd>' + esc(d.app_name) + '</dd><dt>Page Name</dt><dd>' + esc(d.page_name) + '</dd><dt>Page Description (General)</dt><dd>' + esc(d.page_description) + '</dd><dt>Differentiated Content</dt><dd>' + esc(diffDisplay) + '</dd><dt>Last Updated</dt><dd>' + esc(d.last_updated) + '</dd><dt>Success Count</dt><dd>' + (d.success_count != null ? d.success_count : '-') + '</dd><dt>Existence Probability</dt><dd>' + (d.existence_probability != null ? (d.existence_probability * 100).toFixed(2) + '%' : '-') + '</dd><dt>From Steps</dt><dd>' + (d.initial_step_numbers && d.initial_step_numbers.length ? d.initial_step_numbers.join(', ') : '-') + '</dd></div>';
+        }
+        function fmtEdge(d, gr) {
+          var fromNode = gr.nodes.find(function(n) { return n.id === d.from; });
+          var toNode = gr.nodes.find(function(n) { return n.id === d.to; });
+          var fromLabel = fromNode ? fromNode.label : d.from;
+          var toLabel = toNode ? toNode.label : d.to;
+          return '<div class="detail-section"><dt>From</dt><dd>' + esc(fromLabel) + '</dd><dt>To</dt><dd>' + esc(toLabel) + '</dd><dt>Edge Type</dt><dd>' + esc(d.edge_type) + '</dd><dt>From Step</dt><dd>' + (d.initial_step_number != null ? d.initial_step_number : '-') + '</dd><dt>Existence Probability</dt><dd>' + (d.existence_probability != null ? (d.existence_probability * 100).toFixed(2) + '%' : '-') + '</dd><dt>Action (for replay)</dt><dd><pre class="action-json">' + esc(d.action ? JSON.stringify(d.action, null, 2) : '-') + '</pre></dd></div>';
+        }
+        var taskIdDisplay = type === 'node' && data.task_id != null
+          ? (Array.isArray(data.task_id) ? data.task_id.join(', ') : String(data.task_id))
+          : (g.task_id != null ? (Array.isArray(g.task_id) ? g.task_id.join(', ') : String(g.task_id)) : '-');
+        content.innerHTML = '<div class="detail-section"><dt>Task</dt><dd>' + esc(taskIdDisplay) + '</dd><dt>Graph Index</dt><dd>' + idx + '</dd></div>' + (type === 'node' ? fmtNode(data) : fmtEdge(data, g));
+      }
+      function getRollbackVariant() {
+        var r = document.querySelector('input[name="rollback-variant"]:checked');
+        return r ? r.value : 'unmerged';
+      }
+      function getRollbackIndex() {
+        var sel = document.getElementById('rollback-index');
+        return sel ? sel.value : 'all';
+      }
+      function fillRollbackIndexOptions(totalCount) {
+        var sel = document.getElementById('rollback-index');
+        if (!sel) return;
+        var current = sel.value;
+        sel.innerHTML = '';
+        var optAll = document.createElement('option');
+        optAll.value = 'all';
+        optAll.textContent = 'All';
+        sel.appendChild(optAll);
+        for (var i = 0; i < totalCount; i++) {
+          var opt = document.createElement('option');
+          opt.value = String(i);
+          opt.textContent = String(i);
+          sel.appendChild(opt);
+        }
+        if (current === 'all' || (parseInt(current, 10) >= 0 && parseInt(current, 10) < totalCount)) {
+          sel.value = current;
+        } else {
+          sel.value = 'all';
+        }
+      }
+      function applySameEndpointSmooth(edges) {
+        var byKey = {};
+        edges.forEach(function(e) {
+          var k = (e.from || '') + '\t' + (e.to || '');
+          byKey[k] = byKey[k] || [];
+          byKey[k].push(e);
+        });
+        var out = [];
+        edges.forEach(function(e) {
+          var k = (e.from || '') + '\t' + (e.to || '');
+          var group = byKey[k];
+          var copy = {};
+          for (var p in e) if (Object.prototype.hasOwnProperty.call(e, p)) copy[p] = e[p];
+          if (group && group.length > 1) {
+            var idx = group.indexOf(e);
+            var roundness = idx % 2 === 0 ? (0.2 + 0.2 * Math.floor(idx / 2)) : -(0.2 + 0.2 * Math.floor(idx / 2));
+            copy.smooth = { type: 'curvedCW', roundness: roundness };
+          }
+          out.push(copy);
+        });
+        return out;
+      }
+      function getRollbackDataMode() { return (document.getElementById('rollback-data-mode') && document.getElementById('rollback-data-mode').value) || 'base'; }
+      function loadRollbackGraph() {
+        var variant = getRollbackVariant();
+        var index = getRollbackIndex();
+        var dataMode = getRollbackDataMode();
+        var url = '/api/rollback/graph?variant=' + encodeURIComponent(variant) + '&index=' + encodeURIComponent(index) + '&data_mode=' + encodeURIComponent(dataMode);
+        fetch(url).then(function(r) { return r.json(); }).then(function(data) {
+          var graphList = data.graphList || [];
+          var mergedNodes = data.mergedNodes || [];
+          var mergedEdges = applySameEndpointSmooth(data.mergedEdges || []);
+          var totalCount = data.totalCount != null ? data.totalCount : 0;
+          var emptyEl = document.getElementById('rollback-empty');
+          var graphEl = document.getElementById('rollback-graph');
+          fillRollbackIndexOptions(totalCount);
+          if (data.error && !graphList.length) {
+            emptyEl.style.display = 'block';
+            emptyEl.textContent = data.error || 'Graph collection file not found';
+            graphEl.style.display = 'none';
+            if (rollbackNetwork) { rollbackNetwork.destroy(); rollbackNetwork = null; }
+            return;
+          }
+          if (!graphList.length || !mergedNodes.length) {
+            emptyEl.style.display = 'block';
+            emptyEl.textContent = 'No graph collection. Ensure there are success tasks, then click "Generate Graph Collection".';
+            graphEl.style.display = 'none';
+            if (rollbackNetwork) { rollbackNetwork.destroy(); rollbackNetwork = null; }
+            return;
+          }
+          emptyEl.style.display = 'none';
+          graphEl.style.display = 'block';
+          rollbackGraphList = graphList;
+          rollbackSelectedNodes = [];
+          rollbackPathHighlighted = [];
+          rollbackPathEdges = [];
+          function doInit() {
+            if (rollbackNetwork) rollbackNetwork.destroy();
+            rollbackNodes = new vis.DataSet(mergedNodes);
+            mergedNodes.forEach(function(n) {
+              var fullTitle = rollbackNodeFullText(n);
+              if (fullTitle) rollbackNodes.update({ id: n.id, title: fullTitle });
+            });
+            rollbackEdges = new vis.DataSet(mergedEdges);
+            var options = {
+              nodes: { shape: 'circle', font: { size: 12 }, size: 36, margin: 8, borderWidth: 2, shadow: { enabled: true, size: 5 }, chosen: false },
+              edges: { arrows: { to: { enabled: true, scaleFactor: 1.2 } }, font: { size: 10, align: 'middle' }, smooth: { enabled: true, type: 'continuous', roundness: 0.5 }, width: 2 },
+              physics: { enabled: true, stabilization: { enabled: true, iterations: 200, updateInterval: 25 }, barnesHut: { gravitationalConstant: -2000, centralGravity: 0.1, springLength: 200, springConstant: 0.04, damping: 0.09, avoidOverlap: 1 }, maxVelocity: 50, minVelocity: 0.75, solver: 'barnesHut' },
+              layout: { improvedLayout: true, randomSeed: 42 },
+              interaction: { zoomView: true, dragView: true, tooltipDelay: 200, hover: true }
+            };
+            rollbackNetwork = new vis.Network(graphEl, { nodes: rollbackNodes, edges: rollbackEdges }, options);
+            rollbackNetwork.on('stabilizationIterationsDone', function() {
+              rollbackNetwork.setOptions({ physics: { enabled: true, stabilization: false, barnesHut: { gravitationalConstant: -500, centralGravity: 0.05, springLength: 200, springConstant: 0.02, damping: 0.15, avoidOverlap: 1 } } });
+            });
+            rollbackNetwork.on('click', function(params) {
+              if (params.nodes.length) {
+                var nodeId = params.nodes[0];
+                var oldSelected = rollbackSelectedNodes.slice();
+                var newSelected;
+                if (oldSelected.length === 0) {
+                  newSelected = [nodeId];
+                } else if (oldSelected.length === 1) {
+                  newSelected = oldSelected.indexOf(nodeId) >= 0 ? oldSelected : oldSelected.concat(nodeId);
+                } else {
+                  newSelected = [nodeId];
+                }
+                rollbackSelectedNodes = newSelected;
+                oldSelected.forEach(function(id) {
+                  var idx = rollbackSelectedNodes.indexOf(id);
+                  if (idx === -1) applyRollbackNodeStyle(id, false);
+                });
+                rollbackSelectedNodes.forEach(function(id) { applyRollbackNodeStyle(id, true); });
+                updateRollbackSelection();
+                var p = parseRollbackPrefixedId(nodeId);
+                showRollbackDetail(p[0], 'node', p[1]);
+              } else if (params.edges.length) {
+                var p = parseRollbackPrefixedId(params.edges[0]);
+                showRollbackDetail(p[0], 'edge', p[1]);
+              } else {
+                var oldSelected = rollbackSelectedNodes.slice();
+                rollbackSelectedNodes = [];
+                oldSelected.forEach(function(id) { applyRollbackNodeStyle(id, false); });
+                clearRollbackPathHighlight();
+                updateRollbackSelection();
+                var pathResult = document.getElementById('rollback-path-result');
+                if (pathResult) pathResult.style.display = 'none';
+                showRollbackDetail(-1, null, null);
+              }
+            });
+            updateRollbackSelection();
+          }
+          if (typeof vis !== 'undefined') {
+            doInit();
+            rollbackGraphLoaded = true;
+            return;
+          }
+          var script = document.createElement('script');
+          script.src = 'https://unpkg.com/vis-network@9.1.2/standalone/umd/vis-network.min.js';
+          script.onload = function() {
+            doInit();
+            rollbackGraphLoaded = true;
+          };
+          script.onerror = function() {
+            emptyEl.style.display = 'block';
+            emptyEl.textContent = 'Failed to load vis-network. Check your network or try again later.';
+            graphEl.style.display = 'none';
+          };
+          document.head.appendChild(script);
+        }).catch(function() {
+          document.getElementById('rollback-empty').style.display = 'block';
+          document.getElementById('rollback-empty').textContent = 'Failed to load graph collection';
+          document.getElementById('rollback-graph').style.display = 'none';
+        });
+      }
+      function showRollbackMsg(text, isErr) {
+        var el = document.getElementById('rollback-ctrl-msg');
+        if (!el) return;
+        el.textContent = text || '';
+        el.className = 'msg' + (text ? (isErr ? ' err' : ' ok') : '');
+      }
+      document.querySelectorAll('input[name="rollback-variant"]').forEach(function(radio) {
+        radio.addEventListener('change', function() {
+          var sel = document.getElementById('rollback-index');
+          if (sel) sel.value = 'all';
+          loadRollbackGraph();
+        });
+      });
+      document.getElementById('rollback-index').addEventListener('change', function() { loadRollbackGraph(); });
+      document.getElementById('rollback-data-mode').addEventListener('change', function() { loadRollbackGraph(); });
+      document.getElementById('rollback-generate').addEventListener('click', function() {
+        var btn = document.getElementById('rollback-generate');
+        btn.disabled = true;
+        showRollbackMsg('Generating...');
+        fetch('/api/rollback/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data_mode: getRollbackDataMode() }) })
+          .then(function(r) { return r.json(); })
+          .then(function(res) {
+            if (res.ok) { showRollbackMsg(res.message || 'Generated'); loadRollbackGraph(); }
+            else { showRollbackMsg(res.error || 'Generation failed', true); }
+          })
+          .catch(function() { showRollbackMsg('Request failed', true); })
+          .finally(function() { btn.disabled = false; });
+      });
+      document.getElementById('rollback-incremental-merge').addEventListener('click', function() {
+        var btn = document.getElementById('rollback-incremental-merge');
+        var thresholdEl = document.getElementById('rollback-merge-threshold');
+        var mergeThreshold = 0.9;
+        if (thresholdEl) {
+          var v = parseFloat(thresholdEl.value);
+          if (!isNaN(v) && v > 0 && v <= 1) mergeThreshold = v;
+        }
+        btn.disabled = true;
+        showRollbackMsg('Incremental merge in progress...');
+        fetch('/api/rollback/incremental-merge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ merge_threshold: mergeThreshold }) })
+          .then(function(r) { return r.json(); })
+          .then(function(res) {
+            if (res.ok) { showRollbackMsg(res.message || 'Merged'); loadRollbackGraph(); }
+            else { showRollbackMsg(res.error || 'Incremental merge failed', true); }
+          })
+          .catch(function() { showRollbackMsg('Request failed', true); })
+          .finally(function() { btn.disabled = false; });
+      });
+      document.getElementById('rollback-merge').addEventListener('click', function() {
+        var btn = document.getElementById('rollback-merge');
+        var thresholdEl = document.getElementById('rollback-merge-threshold');
+        var mergeThreshold = 0.9;
+        if (thresholdEl) {
+          var v = parseFloat(thresholdEl.value);
+          if (!isNaN(v) && v > 0 && v <= 1) mergeThreshold = v;
+        }
+        btn.disabled = true;
+        showRollbackMsg('Merging...');
+        fetch('/api/rollback/merge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ merge_threshold: mergeThreshold, data_mode: getRollbackDataMode() }) })
+          .then(function(r) { return r.json(); })
+          .then(function(res) {
+            if (res.ok) { showRollbackMsg(res.message || 'Merged'); loadRollbackGraph(); }
+            else { showRollbackMsg(res.error || 'Merge failed', true); }
+          })
+          .catch(function() { showRollbackMsg('Request failed', true); })
+          .finally(function() { btn.disabled = false; });
+      });
+      document.getElementById('rollback-refresh').addEventListener('click', function() {
+        showRollbackMsg('');
+        loadRollbackGraph();
+      });
+      function collectPathData(path, fromNodeId, toNodeId) {
+        if (!path || !rollbackGraphList.length) return null;
+        var fromP = parseRollbackPrefixedId(fromNodeId);
+        var graphIdx = fromP[0];
+        var g = rollbackGraphList[graphIdx];
+        if (!g) return null;
+        var pathNodes = [];
+        var edges = [];
+        for (var i = 0; i < path.nodes.length; i++) {
+          var nodeId = path.nodes[i];
+          var node = g.nodes.find(function(n) { return n.id === nodeId; });
+          if (node) {
+            pathNodes.push({
+              id: nodeId,
+              app_name: node.app_name || '',
+              page_name: node.page_name || '',
+              page_description: node.page_description || '',
+              differentiated_content: node.differentiated_content || [],
+              diff_to_edge_map: node.diff_to_edge_map || {},
+              last_updated: node.last_updated || '',
+              success_count: node.success_count || 0,
+              existence_probability: node.existence_probability || 0,
+              initial_step_numbers: node.initial_step_numbers || [],
+              task_id: node.task_id || []
+            });
+          }
+          if (i < path.nodes.length - 1) {
+            var fromNode = path.nodes[i];
+            var toNode = path.nodes[i + 1];
+            var allEdges = [];
+            g.edges.forEach(function(e) {
+              if (e.from === fromNode && e.to === toNode) {
+                allEdges.push(e);
+              }
+            });
+            edges.push({
+              from_node: fromNode,
+              to_node: toNode,
+              edges: allEdges
+            });
+          }
+        }
+        return {
+          from_node_id: fromNodeId,
+          to_node_id: toNodeId,
+          path_nodes: pathNodes,
+          edges: edges
+        };
+      }
+      document.getElementById('rollback-find-path').addEventListener('click', function() {
+        if (rollbackSelectedNodes.length !== 2 || !rollbackNodes) return;
+        var path = findRollbackPath(rollbackSelectedNodes[0], rollbackSelectedNodes[1]);
+        var pathResult = document.getElementById('rollback-path-result');
+        if (path) {
+          highlightRollbackPath(path);
+          var html = '<strong>Path found (' + (path.nodes.length - 1) + ' steps):</strong><br>';
+          path.edges.forEach(function(edge, idx) {
+            var action = edge.action || {};
+            var actionType = action.action || action.action_type || 'Unknown action';
+            html += '<div class="path-step">' + (idx + 1) + '. ' + String(actionType).replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</div>';
+          });
+          pathResult.innerHTML = html;
+          pathResult.style.display = 'block';
+          var pathData = collectPathData(path, rollbackSelectedNodes[0], rollbackSelectedNodes[1]);
+          if (pathData) {
+            fetch('/api/rollback/save-path', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(pathData)
+            }).then(function(r) { return r.json(); }).then(function(res) {
+              if (res.ok) {
+                showRollbackMsg('Path saved to: ' + (res.file_path || ''));
+              } else {
+                showRollbackMsg('Failed to save path: ' + (res.error || ''), true);
+              }
+            }).catch(function(err) {
+              showRollbackMsg('Failed to save path: ' + err.message, true);
+            });
+          }
+        } else {
+          pathResult.innerHTML = '<strong>Path not found</strong>';
+          pathResult.style.display = 'block';
+        }
+      });
+      function doRollbackReplay(btn) {
+        if (rollbackSelectedNodes.length !== 2 || !rollbackGraphList.length) { alert('Please select two nodes on Graph Build and generate candidate paths first'); return; }
+        var path = findRollbackPath(rollbackSelectedNodes[0], rollbackSelectedNodes[1]);
+        if (!path || !path.edges.length) { alert('No replayable path found'); return; }
+        var sequence = [];
+        path.edges.forEach(function(edge) {
+          var action = edge.action;
+          if (action && typeof action === 'object' && !Array.isArray(action) && Object.keys(action).length > 0) sequence.push(action);
+        });
+        if (!sequence.length) { alert('No executable actions in path'); return; }
+        var originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Executing...';
+        fetch('/api/rollback/replay', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sequence: sequence, delay: 2.0 }) })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.success) alert('Replay started. Check the device. ' + sequence.length + ' steps, 2s interval per step.');
+            else alert('Execution failed: ' + (data.error || 'Unknown error'));
+          })
+          .catch(function(err) { alert('Request failed: ' + err.message); })
+          .finally(function() { btn.disabled = false; btn.textContent = originalText; });
+      }
+      document.getElementById('rollback-attack-replay').addEventListener('click', function() { doRollbackReplay(this); });
+      (function() {
+        var overlay = document.getElementById('stats-modal-overlay');
+        var content = document.getElementById('stats-modal-content');
+        var closeBtn = document.getElementById('stats-modal-close');
+        function closeStatsModal() { if (overlay) overlay.style.display = 'none'; }
+        function showStatsModal(html) {
+          if (content) content.innerHTML = html;
+          if (overlay) overlay.style.display = 'flex';
+        }
+        if (closeBtn) closeBtn.addEventListener('click', closeStatsModal);
+        if (overlay) overlay.addEventListener('click', function(e) { if (e.target === overlay) closeStatsModal(); });
+        document.getElementById('rollback-attack-display-stats').addEventListener('click', function() {
+          var dataMode = (document.getElementById('rollback-data-mode') && document.getElementById('rollback-data-mode').value) || 'base';
+          fetch('/api/rollback/stats?data_mode=' + encodeURIComponent(dataMode))
+            .then(function(r) { return r.json(); })
+            .then(function(res) {
+              if (!res.ok) {
+                alert(res.error || 'Failed to load statistics');
+                return;
+              }
+              var d = res.data || {};
+              function esc(s) { s = (s === undefined || s === null) ? '' : String(s); return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+              var html = '<div style="margin-bottom:12px;"><strong>Overall</strong></div>';
+              html += '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;margin-bottom:14px;">';
+              html += '<tr><td>Task count</td><td>' + esc(d.task_count) + '</td></tr>';
+              html += '<tr><td>Nodes (pre-merge total)</td><td>' + esc(d.nodes_pre_total) + '</td></tr>';
+              html += '<tr><td>Edges (pre-merge total)</td><td>' + esc(d.edges_pre_total) + '</td></tr>';
+              if (d.nodes_merged_total != null) {
+                html += '<tr><td>Nodes (merged total)</td><td>' + esc(d.nodes_merged_total) + '</td></tr>';
+                html += '<tr><td>Edges (merged total)</td><td>' + esc(d.edges_merged_total) + '</td></tr>';
+                html += '<tr><td>NCR (Node Compression Rate)</td><td>' + esc(d.NCR) + '</td></tr>';
+                html += '<tr><td>ECR (Edge Compression Rate)</td><td>' + esc(d.ECR) + '</td></tr>';
+                html += '<tr><td>GMT (merge time, s)</td><td>' + esc(d.merge_time_s) + '</td></tr>';
+              }
+              html += '</table>';
+              if (d.action_type_counts_pre && Object.keys(d.action_type_counts_pre).length) {
+                html += '<div style="margin-bottom:8px;"><strong>Action type counts (pre-merge, ATAD)</strong></div>';
+                html += '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;margin-bottom:14px;">';
+                Object.keys(d.action_type_counts_pre).forEach(function(k) {
+                  html += '<tr><td>' + esc(k) + '</td><td>' + esc(d.action_type_counts_pre[k]) + '</td></tr>';
+                });
+                html += '</table>';
+              }
+              if (d.action_type_counts_merged && Object.keys(d.action_type_counts_merged).length) {
+                html += '<div style="margin-bottom:8px;"><strong>Action type counts (merged)</strong></div>';
+                html += '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;margin-bottom:14px;">';
+                Object.keys(d.action_type_counts_merged).forEach(function(k) {
+                  html += '<tr><td>' + esc(k) + '</td><td>' + esc(d.action_type_counts_merged[k]) + '</td></tr>';
+                });
+                html += '</table>';
+              }
+              if (d.per_task && d.per_task.length) {
+                html += '<div style="margin-bottom:8px;"><strong>Per-task (ATAD)</strong></div>';
+                var pt = d.per_task;
+                var ptKeys = [];
+                var seen = {};
+                pt.forEach(function(row) { Object.keys(row).forEach(function(k) { if (!seen[k]) { seen[k] = true; ptKeys.push(k); } }); });
+                html += '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;margin-bottom:14px;">';
+                html += '<thead><tr>';
+                ptKeys.forEach(function(k) { html += '<th style="text-align:left;">' + esc(k) + '</th>'; });
+                html += '</tr></thead><tbody>';
+                pt.forEach(function(row) {
+                  html += '<tr>';
+                  ptKeys.forEach(function(k) { html += '<td>' + esc(row[k]) + '</td>'; });
+                  html += '</tr>';
+                });
+                html += '</tbody></table>';
+              }
+              if (d.per_merged_graph && d.per_merged_graph.length) {
+                html += '<div style="margin-bottom:8px;"><strong>Per merged graph</strong></div>';
+                var pm = d.per_merged_graph;
+                var pmKeys = [];
+                var seen2 = {};
+                pm.forEach(function(row) { Object.keys(row).forEach(function(k) { if (!seen2[k]) { seen2[k] = true; pmKeys.push(k); } }); });
+                html += '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;margin-bottom:14px;">';
+                html += '<thead><tr>';
+                pmKeys.forEach(function(k) { html += '<th style="text-align:left;">' + esc(k) + '</th>'; });
+                html += '</tr></thead><tbody>';
+                pm.forEach(function(row) {
+                  html += '<tr>';
+                  pmKeys.forEach(function(k) { html += '<td>' + esc(row[k]) + '</td>'; });
+                  html += '</tr>';
+                });
+                html += '</tbody></table>';
+              }
+              if (d.complete_task_paths) {
+                var ctp = d.complete_task_paths;
+                html += '<div style="margin-bottom:8px;"><strong>Complete task paths</strong></div>';
+                html += '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;margin-bottom:14px;">';
+                html += '<tr><td>Total node paths</td><td>' + esc(ctp.total_node_paths) + '</td></tr>';
+                html += '<tr><td>Total expanded paths</td><td>' + esc(ctp.total_expanded_paths) + '</td></tr>';
+                html += '<tr><td>Start node count</td><td>' + esc(ctp.start_node_count != null ? ctp.start_node_count : '-') + '</td></tr>';
+                html += '<tr><td>End node count</td><td>' + esc(ctp.end_node_count != null ? ctp.end_node_count : '-') + '</td></tr>';
+                html += '</table>';
+                if (ctp.paths_by_graph && Object.keys(ctp.paths_by_graph).length) {
+                  html += '<div style="margin-bottom:6px;">Paths by graph</div>';
+                  html += '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;">';
+                  html += '<thead><tr><th>Graph index</th><th>Node path count</th><th>Expanded path count</th></tr></thead><tbody>';
+                  Object.keys(ctp.paths_by_graph).forEach(function(idx) {
+                    var g = ctp.paths_by_graph[idx];
+                    html += '<tr><td>' + esc(idx) + '</td><td>' + esc(g.node_path_count) + '</td><td>' + esc(g.expanded_path_count) + '</td></tr>';
+                  });
+                  html += '</tbody></table>';
+                }
+              }
+              showStatsModal(html);
+            })
+            .catch(function(err) { alert('Request failed: ' + (err.message || err)); });
+        });
+      })();
+      document.getElementById('rollback-same-endpoints').addEventListener('click', function() {
+        var pathResult = document.getElementById('rollback-path-result');
+        if (!rollbackEdges) {
+          pathResult.innerHTML = 'Load graph collection first';
+          pathResult.style.display = 'block';
+          return;
+        }
+        var edges = rollbackEdges.get();
+        var byKey = {};
+        edges.forEach(function(e) {
+          var k = (e.from || '') + '\t' + (e.to || '');
+          byKey[k] = byKey[k] || [];
+          byKey[k].push(e);
+        });
+        var groups = [];
+        Object.keys(byKey).forEach(function(k) {
+          if (byKey[k].length > 1) groups.push({ key: k, edges: byKey[k] });
+        });
+        if (groups.length === 0) {
+          pathResult.innerHTML = '<strong>Edges with same endpoints: 0 groups</strong>';
+        } else {
+          var lines = ['<strong>Edges with same endpoints: ' + groups.length + ' groups</strong>'];
+          groups.forEach(function(g) {
+            var parts = g.key.split('\t');
+            lines.push(parts[0] + ' → ' + parts[1] + ': ' + g.edges.length + ' edge(s)');
+          });
+          pathResult.innerHTML = lines.join('<br>');
+        }
+        pathResult.style.display = 'block';
+      });
+      document.getElementById('rollback-clear').addEventListener('click', function() {
+        rollbackSelectedNodes.forEach(function(nodeId) { applyRollbackNodeStyle(nodeId, false); });
+        rollbackSelectedNodes = [];
+        clearRollbackPathHighlight();
+        updateRollbackSelection();
+        var pathResult = document.getElementById('rollback-path-result');
+        var detailContent = document.getElementById('rollback-detail-content');
+        if (pathResult) pathResult.style.display = 'none';
+        if (detailContent) detailContent.innerHTML = '<p class="empty" id="rollback-detail-hint">Click a node or edge to view details</p>';
+      });
+      var rollbackAttackJsonContent = '';
+      document.getElementById('rollback-attack-json-file').addEventListener('change', function() {
+        var file = this.files && this.files[0];
+        var nameEl = document.getElementById('rollback-attack-json-name');
+        rollbackAttackJsonContent = '';
+        if (!file) { nameEl.textContent = 'No file selected'; return; }
+        nameEl.textContent = file.name;
+        var reader = new FileReader();
+        reader.onload = function() { rollbackAttackJsonContent = reader.result || ''; };
+        reader.readAsText(file, 'UTF-8');
+      });
+      document.getElementById('rollback-attack-request').addEventListener('click', function() {
+        var goal = document.getElementById('rollback-attack-goal').value.trim();
+        var msgEl = document.getElementById('rollback-attack-msg');
+        if (!goal) { msgEl.textContent = 'Please enter a goal.'; msgEl.className = 'msg err'; return; }
+        if (!rollbackAttackJsonContent) { msgEl.textContent = 'Please select a path simplify JSON file first.'; msgEl.className = 'msg err'; return; }
+        msgEl.textContent = '';
+        msgEl.className = 'msg';
+        var btn = document.getElementById('rollback-attack-request');
+        var originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Requesting...';
+        fetch('/api/rollback/path-generation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ goal: goal, json_content: rollbackAttackJsonContent })
+        }).then(function(r) { return r.json(); }).then(function(res) {
+          if (res.ok && res.result) {
+            msgEl.textContent = 'supported: ' + res.result.supported + (res.result.reason ? ' — ' + res.result.reason : '');
+            msgEl.className = 'msg ok';
+            var displayEl = document.getElementById('rollback-attack-display');
+            displayEl.textContent = JSON.stringify(res.result, null, 2);
+            displayEl.style.padding = '12px';
+            displayEl.style.fontSize = '12px';
+            displayEl.style.whiteSpace = 'pre-wrap';
+            displayEl.style.wordBreak = 'break-all';
+          } else {
+            msgEl.textContent = res.error || 'Request failed';
+            msgEl.className = 'msg err';
+          }
+        }).catch(function(err) {
+          msgEl.textContent = 'Request failed: ' + err.message;
+          msgEl.className = 'msg err';
+        }).finally(function() { btn.disabled = false; btn.textContent = originalText; });
+      });
+      document.getElementById('env-select-dir').addEventListener('click', function() {
+        showMsg('env-project-msg', 'Select a directory in the dialog...');
+        fetch('/api/pick-directory').then(function(r) { return r.json(); }).then(function(res) {
+          if (res.ok && res.path) {
+            document.getElementById('env-project-root').value = res.path;
+            fetch('/api/project', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ project_root: res.path })
+            }).then(function(r2) { return r2.json(); }).then(function(res2) {
+              if (res2.ok) { showMsg('env-project-msg', 'Directory selected and applied'); loadConfig(); }
+              else { showMsg('env-project-msg', res2.error || 'Apply failed', true); }
+            }).catch(function() { showMsg('env-project-msg', 'Apply request failed', true); });
+          } else {
+            showMsg('env-project-msg', res.error || 'No directory selected', true);
+          }
+        }).catch(function() { showMsg('env-project-msg', 'Request failed', true); });
+      });
+      document.getElementById('env-select-update-dir').addEventListener('click', function() {
+        var msgEl = document.getElementById('env-update-data-msg');
+        msgEl.textContent = 'Select a directory in the dialog...';
+        msgEl.className = 'msg';
+        fetch('/api/pick-directory').then(function(r) { return r.json(); }).then(function(res) {
+          if (res.ok && res.path) {
+            document.getElementById('env-update-data-root').value = res.path;
+            msgEl.textContent = 'Filled. Click "Save Configuration" to save';
+            msgEl.className = 'msg ok';
+          } else {
+            msgEl.textContent = res.error || 'No directory selected';
+            msgEl.className = 'msg err';
+          }
+        }).catch(function() { msgEl.textContent = 'Request failed'; msgEl.className = 'msg err'; });
+      });
+      document.getElementById('env-save').addEventListener('click', function() {
+        var payload = {
+          autoglm: {
+            api_key: document.getElementById('env-autoglm-key').value.trim(),
+            base_url: document.getElementById('env-autoglm-base').value.trim()
+          },
+          post_processing: {
+            coze_api_token: document.getElementById('env-post-token').value.trim(),
+            workflow_id: document.getElementById('env-post-id').value.trim(),
+            path_generation_workflow_id: document.getElementById('env-path-gen-id').value.trim()
+          },
+          update_data_directory: document.getElementById('env-update-data-root').value.trim()
+        };
+        showMsg('env-save-msg', '');
+        fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(function(r) { return r.json(); }).then(function(res) {
+          if (res.ok) showMsg('env-save-msg', 'Saved');
+          else showMsg('env-save-msg', res.error || 'Save failed', true);
+        }).catch(function() { showMsg('env-save-msg', 'Request failed', true); });
+      });
+      loadConfig();
+    })();
+  </script>
+</body>
+</html>

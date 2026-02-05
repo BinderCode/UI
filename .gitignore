@@ -1,0 +1,41 @@
+# Compiled python modules.
+*.pyc
+
+# Byte-compiled
+_pycache__/
+.cache/
+
+# Poetry, setuptools, PyPI distribution artifacts.
+/*.egg-info
+.eggs/
+build/
+dist/
+poetry.lock
+
+# Tests
+.pytest_cache/
+
+# Type checking
+.pytype/
+
+# Other
+*.DS_Store
+
+# PyCharm
+.idea
+
+# 本地密钥备份（复制 secrets.json.example 为 secrets.json 后填入真实值，不提交）
+secrets.json
+
+# GitHub workflows (managed elsewhere or not needed in this repo)
+.github/
+
+autoglm_runs/
+autoglm_runs_2/
+autoglm_runs_2/chat_plus_shopping_merged.csv
+android_world.zip
+autoglm_runs_2/chat_plus_shopping_merged.csv
+graph_build/graph_collection_preview.html
+autoglm_runs_2.zip
+graph_build/merge_candidate_pairs.json
+cache/
